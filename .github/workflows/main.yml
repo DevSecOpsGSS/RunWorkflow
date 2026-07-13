@@ -70,7 +70,7 @@ jobs:
       PYTHONUNBUFFERED: 1
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Verify Python version
         shell: cmd
@@ -632,7 +632,7 @@ jobs:
               main()
 
       - name: Upload Reports to Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: GSS_Report
           path: Reports/**
