@@ -1,0 +1,569 @@
+name: 'Mend掃描(old-ts-web)'
+
+on:
+  workflow_dispatch:
+
+env:
+  # GitHub Secrets (從 GitHub Secrets 取得)
+  GITHUB_TOKEN: ${{ secrets.ORG_ACTION_ACCESS_TOKEN }}
+  MEND_EMAIL: ${{ secrets.MEND_EMAIL }}
+  MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
+  MEND_ORG_UUID: ${{ secrets.MEND_ORG_UUID }}   # Mend Platform -> Administration -> General Configuration -> Organization UUID
+
+  # 部門名稱 如 OLD_TS
+  DEPARTMENT: 'OLD_TS'
+
+  # Category 前綴對照表 (JSON 格式)
+  CATEGORY_GROUPS_JSON: |
+    {
+      "Api": ["Server(.NET)","Server(Go)"],
+      "Server_Web": ["Client(Vue)", "Tool(.NET)", "Package(.NET)", "ServerClient(.Net Framework)", "DLL(.Net Framework)", "Tool(.Net Framework)"]
+    }
+
+  # Mend 設定
+  MEND_URL: 'https://saas.mend.io'
+  # Mend AppSec Platform API v3.0 - 統一用來拉 SCA (SBOM/Risk/Inventory/Due Diligence) 與 SAST (Code Compliance) 報告
+  MEND_API_URL: 'https://api-saas.mend.io/api/v3.0'
+
+  # API 設定
+  GITHUB_API: 'https://api.github.com'
+
+  # Clone 路徑
+  CLONE_BASE_DIR: '/tmp/MendRepos'
+
+jobs:
+  run-MendScanRepo:
+    runs-on:
+      group: devsecops_group
+    timeout-minutes: 1440
+    env:
+      PYTHONUNBUFFERED: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Mend CLI
+        run: |
+          curl -LJO https://downloads.mend.io/cli/linux_amd64/mend
+          chmod +x mend
+          sudo mv mend /usr/local/bin/mend
+          mend version
+
+      - name: Verify Python version
+        run: python --version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run MendScanRepo.py inside workflow
+        shell: python
+        env:
+          GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+          MEND_EMAIL: ${{ env.MEND_EMAIL }}
+          MEND_USER_KEY: ${{ env.MEND_USER_KEY }}
+          MEND_ORG_UUID: ${{ env.MEND_ORG_UUID }}
+          MEND_URL: ${{ env.MEND_URL }}
+          MEND_API_URL: ${{ env.MEND_API_URL }}
+          GITHUB_API: ${{ env.GITHUB_API }}
+          DEPARTMENT: ${{ env.DEPARTMENT }}
+          CLONE_BASE_DIR: ${{ env.CLONE_BASE_DIR }}
+          CATEGORY_GROUPS_JSON: ${{ env.CATEGORY_GROUPS_JSON }}
+        run: |
+          import os, json, requests, subprocess, shutil, stat, time, sys, signal, threading
+
+          # ============================================================
+          # 使用者可調整參數 (放在腳本最上方，方便自行修改)
+          # ============================================================
+          # Code Compliance Report (SAST) 使用的合規標準
+          # 可選值請以 Mend Platform 建立報告時的下拉選單為準，常見如：
+          # "OWASP Top 10", "OWASP API Security Top 10", "PCI DSS", "CWE Top 25" 等
+          COMPLIANCE_STANDARD = "OWASP Top 10"
+
+          # SBOM 報告：reportType 決定輸出的 SBOM 標準 (cycloneDX / spdx 等)，format 決定檔案格式
+          SBOM_REPORT_TYPE = "cycloneDX"
+          SBOM_FORMAT = "json"
+
+          # Risk Report 格式 (依 Mend Platform UI 固定為 PDF)
+          RISK_REPORT_FORMAT = "pdf"
+
+          # Inventory Report 格式：excel / json / xml
+          INVENTORY_REPORT_FORMAT = "excel"
+
+          # Due Diligence Report 格式：excel / json / xml (不支援 pdf)
+          DUE_DILIGENCE_FORMAT = "json"
+
+          # Mend 後台處理掃描結果的輪詢設定（掃描完到 project 出現在 API 之間的等待）
+          PROJECT_WAIT_MAX_RETRIES = 10
+          PROJECT_WAIT_INTERVAL_SECONDS = 15
+
+          # 非同步報告的輪詢設定
+          REPORT_POLL_MAX_RETRIES = 20
+          REPORT_POLL_INTERVAL_SECONDS = 15
+          # ============================================================
+
+          CANCEL = threading.Event()
+
+          def _soft_cancel(signum, frame):
+              CANCEL.set()
+              try:
+                  sys.stdout.reconfigure(encoding='utf-8')
+                  sys.stderr.reconfigure(encoding='utf-8')
+              except Exception:
+                  pass
+              print(f"\n[WARN] 收到中斷訊號 ({signum})，將在安全點停止當前掃描並繼續下一個專案。", flush=True)
+
+          signal.signal(signal.SIGINT, _soft_cancel)
+
+          DEPARTMENT = os.getenv("DEPARTMENT", "OLD_TS")
+          CLONE_BASE_DIR = os.getenv("CLONE_BASE_DIR", "/tmp/MendRepos")
+          API = os.getenv("GITHUB_API", "https://api.github.com")
+          MEND_URL = os.getenv("MEND_URL", "https://saas.mend.io")
+          MEND_API_URL = os.getenv("MEND_API_URL", "https://api-saas.mend.io/api/v3.0")
+
+          GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+          MEND_EMAIL = os.getenv("MEND_EMAIL")
+          MEND_USER_KEY = os.getenv("MEND_USER_KEY")
+          MEND_ORG_UUID = os.getenv("MEND_ORG_UUID")
+
+          CATEGORY_GROUPS_JSON_STR = os.getenv("CATEGORY_GROUPS_JSON", '{}')
+          CATEGORY_GROUPS = json.loads(CATEGORY_GROUPS_JSON_STR)
+
+          print("[DEBUG] MEND_USER_KEY present?", "YES" if MEND_USER_KEY else "NO")
+          print("[DEBUG] MEND_ORG_UUID present?", "YES" if MEND_ORG_UUID else "NO")
+          print("[DEBUG] DEPARTMENT:", DEPARTMENT)
+          print("[DEBUG] CATEGORY_GROUPS:", CATEGORY_GROUPS)
+          print("[DEBUG] COMPLIANCE_STANDARD:", COMPLIANCE_STANDARD)
+
+          HEADERS = {
+              "Authorization": f"Bearer {GITHUB_TOKEN}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28"
+          }
+
+          CATEGORY_MAP = {
+              key: category
+              for category, keys in CATEGORY_GROUPS.items()
+              for key in keys
+          }
+
+
+          def detect_project_type(repo_project_type: str) -> str:
+              return CATEGORY_MAP.get(repo_project_type, "UNKNOWN")
+
+          # =========================
+          # 抓取帳號所屬的所有 org (GitHub)
+          # =========================
+          def get_user_orgs() -> list:
+              url = f"{API}/user/orgs"
+              resp = requests.get(url, headers=HEADERS, timeout=15)
+              resp.raise_for_status()
+              return [org["login"] for org in resp.json()]
+
+
+          def get_org_repos(org: str, per_page=100):
+              url = f"{API}/orgs/{org}/repos"
+              repos, page = [], 1
+              while True:
+                  resp = requests.get(url, headers=HEADERS, params={"per_page": per_page, "page": page})
+                  resp.raise_for_status()
+                  data = resp.json()
+                  if not data:
+                      break
+                  for r in data:
+                      repos.append({"org": org, "name": r["name"], "https_url": r["clone_url"]})
+                  page += 1
+              return repos
+
+
+          def get_repo_properties(owner: str, repo: str) -> dict:
+              url = f"{API}/repos/{owner}/{repo}/properties/values"
+              resp = requests.get(url, headers=HEADERS, timeout=15)
+              if resp.status_code == 404:
+                  print(f"[WARN] {owner}/{repo} 沒有 custom properties 或無法存取 (404)")
+                  return {}
+              resp.raise_for_status()
+              props = {}
+              for item in resp.json():
+                  props[item["property_name"]] = item["value"]
+              return props
+
+
+          def on_rm_error(func, path, exc_info):
+              os.chmod(path, stat.S_IWRITE)
+              func(path)
+
+
+          def checkout_repo(org: str, repo: str) -> str:
+              repo_fullname = f"{org}/{repo}"
+              repo_dir = os.path.join(CLONE_BASE_DIR, repo)
+              print(f"[INFO] 開始 checkout {repo_fullname} 到 {repo_dir}")
+
+              if os.path.exists(repo_dir):
+                  print(f"[WARN] {repo_dir} 已存在，刪除後重新 clone")
+                  shutil.rmtree(repo_dir, onerror=on_rm_error)
+
+              cmd = [
+                  "git", "clone", "--depth", "1",
+                  f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo_fullname}.git",
+                  repo_dir
+              ]
+              try:
+                  subprocess.run(cmd, check=True, capture_output=True, text=True)
+                  print(f"[SUCCESS] {repo_fullname} 已 clone 到 {repo_dir}")
+                  return repo_dir
+              except subprocess.CalledProcessError as e:
+                  print(f"[!] git clone 失敗 (exit code {e.returncode})")
+                  print("[STDERR]", e.stderr.strip())
+                  raise
+
+          # =========================
+          # 通用：執行 Mend CLI 指令（mend dep / mend code 共用）
+          # =========================
+          def run_mend_command(cmd: list, label: str) -> bool:
+              print(f"[INFO] 執行命令 ({label}): {' '.join(cmd)}")
+
+              env = os.environ.copy()
+              env["MEND_URL"] = MEND_URL
+              env["MEND_EMAIL"] = MEND_EMAIL
+              env["MEND_USER_KEY"] = MEND_USER_KEY
+
+              p = subprocess.Popen(
+                  cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                  text=True, bufsize=1, env=env
+              )
+
+              rc = None
+              try:
+                  for line in iter(p.stdout.readline, ''):
+                      if CANCEL.is_set():
+                          print(f"\n[WARN] 已收到取消旗標，停止 {label} 掃描…", flush=True)
+                          break
+                      sys.stdout.write(line); sys.stdout.flush()
+
+                  if CANCEL.is_set() and p.poll() is None:
+                      try: p.terminate()
+                      except Exception: pass
+                      try: p.wait(timeout=5)
+                      except Exception:
+                          try: p.kill()
+                          except Exception: pass
+
+                  if not CANCEL.is_set():
+                      rc = p.wait()
+                      if rc == 0:
+                          print(f"[SUCCESS] {label} 掃描完成", flush=True)
+                      else:
+                          print(f"[ERROR] {label} 掃描失敗 (ReturnCode={rc})", flush=True)
+
+              except KeyboardInterrupt:
+                  CANCEL.set()
+                  print(f"\n[WARN] 收到中斷，停止 {label} 掃描。", flush=True)
+                  try: p.terminate()
+                  except Exception: pass
+                  try: p.wait(timeout=5)
+                  except Exception:
+                      try: p.kill()
+                      except Exception: pass
+
+              finally:
+                  try:
+                      if p.stdout: p.stdout.close()
+                  except Exception:
+                      pass
+
+              if CANCEL.is_set():
+                  print(f"[SKIP] {label} 已被取消。", flush=True)
+                  return False
+
+              return rc == 0
+
+
+          def run_mend_sca_scan(project_path, application_name, project_name) -> bool:
+              cmd = ["mend", "dep", "-d", project_path, "--update",
+                     "--scope", f"{application_name}//{project_name}", "--non-interactive"]
+              return run_mend_command(cmd, "SCA")
+
+
+          def run_mend_sast_scan(project_path, application_name, project_name) -> bool:
+              cmd = ["mend", "code", "-d", project_path,
+                     "--scope", f"{application_name}//{project_name}", "--non-interactive"]
+              return run_mend_command(cmd, "SAST")
+
+          # =========================
+          # Mend AppSec Platform API (v3.0) - 統一認證與報告下載
+          # 官方文件參考:
+          #   SBOM (Dependencies - SCA): https://api-docs.mend.io/platform/3.0/reports/exportsbomreport
+          #   Risk Report (Dependencies - SCA): https://api-docs.mend.io/platform/3.0/reports/exportprojectriskreport
+          #   Inventory Report (Dependencies - SCA): https://api-docs.mend.io/platform/3.0/reports/exportprojectinventoryreport
+          #   Due Diligence Report (Dependencies - SCA): https://api-docs.mend.io/platform/3.0/reports/exportprojectduediligencereport
+          #   Code Compliance Report (SAST): https://api-docs.mend.io/platform/3.0/reports/exportcodecompliancereport
+          #   Download Report: https://api-docs.mend.io/platform/3.0/reports/downloadreport
+          # 認證流程: login (email+userKey+orgUuid) -> refreshToken -> login/accessToken -> jwtToken (30分鐘效期)
+          #
+          # !!! 注意 !!!
+          # dependencies/reports/risk 與 dependencies/reports/inventory 這兩個路徑的文件頁面
+          # 抓取時只回傳到標題 (確認是 "Dependencies - SCA" 底下的端點)，沒有拿到逐欄位內容，
+          # 是依 SBOM ("dependencies/reports/SBOM") 與 Due Diligence ("dependencies/reports/dueDiligence")
+          # 已驗證路徑的命名規律，以及 reportType enum 中本來就有的 "risk"、"inventory" 值推斷出來的。
+          # 正式使用前請先用 Postman 或測試環境實際打一次確認路徑與必要欄位。
+          # =========================
+          _jwt_state = {"token": None, "expires_at": 0}
+
+          def get_mend_platform_token() -> str:
+              if _jwt_state["token"] and time.time() < _jwt_state["expires_at"]:
+                  return _jwt_state["token"]
+
+              login_payload = {"email": MEND_EMAIL, "userKey": MEND_USER_KEY, "orgUuid": MEND_ORG_UUID}
+              login_resp = requests.post(f"{MEND_API_URL}/login", json=login_payload, timeout=30)
+              login_resp.raise_for_status()
+              refresh_token = login_resp.json()["response"]["refreshToken"]
+
+              token_resp = requests.post(
+                  f"{MEND_API_URL}/login/accessToken",
+                  headers={"wss-refresh-token": refresh_token},
+                  params={"orgUuid": MEND_ORG_UUID},
+                  json={},
+                  timeout=30
+              )
+              token_resp.raise_for_status()
+              jwt_token = token_resp.json()["response"]["jwtToken"]
+
+              _jwt_state["token"] = jwt_token
+              _jwt_state["expires_at"] = time.time() + 25 * 60  # 提前於 30 分鐘效期到期前換新
+              return jwt_token
+
+
+          def mend_platform_headers() -> dict:
+              return {"Authorization": f"Bearer {get_mend_platform_token()}", "Content-Type": "application/json"}
+
+
+          def get_project_uuid(application_name: str, project_name: str):
+              """
+              GET /api/v3.0/orgs/{orgUuid}/projects?filter=name:equals:{project_name}
+              比對 applicationName 確保是同一個 Application 底下的 Project
+              (SCA 與 SAST 掃描共用同一個 Application//Project scope，所以只需要查一次)
+              """
+              url = f"{MEND_API_URL}/orgs/{MEND_ORG_UUID}/projects"
+              params = {"filter": f"name:equals:{project_name}"}
+              resp = requests.get(url, headers=mend_platform_headers(), params=params, timeout=30)
+              resp.raise_for_status()
+              for proj in resp.json().get("response", []):
+                  if proj.get("name") == project_name and proj.get("applicationName") == application_name:
+                      return proj.get("uuid")
+              return None
+
+
+          def wait_for_project_uuid(application_name: str, project_name: str,
+                                     max_retries=PROJECT_WAIT_MAX_RETRIES, wait_seconds=PROJECT_WAIT_INTERVAL_SECONDS):
+              for attempt in range(1, max_retries + 1):
+                  project_uuid = get_project_uuid(application_name, project_name)
+                  if project_uuid:
+                      return project_uuid
+                  print(f"[INFO] Mend 後台尚未處理完成，等待 {wait_seconds} 秒後重試 ({attempt}/{max_retries})...")
+                  time.sleep(wait_seconds)
+              return None
+
+
+          def generate_and_download_v3_report(create_path: str, payload: dict, output_path: str, label: str) -> bool:
+              """
+              共用流程: 建立報告 -> 輪詢狀態 -> 下載
+              create_path 例如 f"projects/{project_uuid}/dependencies/reports/risk"
+              """
+              headers = mend_platform_headers()
+              resp = requests.post(f"{MEND_API_URL}/{create_path}", json=payload, headers=headers, timeout=60)
+              if resp.status_code not in (200, 201, 202):
+                  print(f"[ERROR] 建立 {label} 失敗，status={resp.status_code}, body={resp.text[:300]}")
+                  return False
+
+              report_uuid = resp.json().get("response", {}).get("uuid")
+              if not report_uuid:
+                  print(f"[ERROR] 無法取得 {label} 的 report uuid: {resp.text[:300]}")
+                  return False
+
+              for attempt in range(1, REPORT_POLL_MAX_RETRIES + 1):
+                  sresp = requests.get(
+                      f"{MEND_API_URL}/orgs/{MEND_ORG_UUID}/reports/{report_uuid}",
+                      headers=mend_platform_headers(), timeout=30
+                  )
+                  sresp.raise_for_status()
+                  status = sresp.json().get("response", {}).get("status")
+                  print(f"[INFO] {label} 狀態: {status} ({attempt}/{REPORT_POLL_MAX_RETRIES})")
+                  if status == "SUCCESS":
+                      break
+                  if status in ("FAILED", "FAILURE"):
+                      print(f"[ERROR] {label} 產生失敗")
+                      return False
+                  time.sleep(REPORT_POLL_INTERVAL_SECONDS)
+              else:
+                  print(f"[ERROR] {label} 輪詢逾時")
+                  return False
+
+              dresp = requests.get(
+                  f"{MEND_API_URL}/orgs/{MEND_ORG_UUID}/reports/download/{report_uuid}",
+                  headers=mend_platform_headers(), timeout=120
+              )
+              if dresp.status_code != 200:
+                  print(f"[ERROR] {label} 下載失敗，status={dresp.status_code}")
+                  return False
+
+              with open(output_path, "wb") as f:
+                  f.write(dresp.content)
+              print(f"[SUCCESS] {label} 已下載: {output_path}")
+              return True
+
+
+          def download_sbom_report(project_uuid: str, output_path: str) -> bool:
+              payload = {"name": "SBOM Report", "format": SBOM_FORMAT, "reportType": SBOM_REPORT_TYPE}
+              return generate_and_download_v3_report(
+                  f"projects/{project_uuid}/dependencies/reports/SBOM", payload, output_path, "SBOM"
+              )
+
+
+          def download_risk_report(project_uuid: str, output_path: str) -> bool:
+              payload = {"name": "Risk Report", "format": RISK_REPORT_FORMAT}
+              return generate_and_download_v3_report(
+                  f"projects/{project_uuid}/dependencies/reports/risk", payload, output_path, "Risk Report"
+              )
+
+
+          def download_inventory_report(project_uuid: str, output_path: str) -> bool:
+              payload = {"name": "Inventory Report", "format": INVENTORY_REPORT_FORMAT}
+              return generate_and_download_v3_report(
+                  f"projects/{project_uuid}/dependencies/reports/inventory", payload, output_path, "Inventory Report"
+              )
+
+
+          def download_due_diligence_report(project_uuid: str, output_path: str) -> bool:
+              payload = {"name": "Due Diligence Report", "format": DUE_DILIGENCE_FORMAT}
+              return generate_and_download_v3_report(
+                  f"projects/{project_uuid}/dependencies/reports/dueDiligence", payload, output_path, "Due Diligence Report"
+              )
+
+
+          def download_code_compliance_report(project_uuid: str, output_path: str) -> bool:
+              payload = {
+                  "name": "Code Compliance Report",
+                  "format": "pdf",
+                  "exportMode": "fullPdf",
+                  "complianceStandard": COMPLIANCE_STANDARD
+              }
+              return generate_and_download_v3_report(
+                  f"projects/{project_uuid}/code/reports/compliance", payload, output_path, "Code Compliance Report"
+              )
+
+          # =========================
+          # 檔案名稱依副檔名決定（依格式）
+          # =========================
+          _EXT_MAP = {"json": "json", "xml": "xml", "excel": "xlsx", "pdf": "pdf"}
+
+          def _ext_for(fmt: str) -> str:
+              return _EXT_MAP.get(fmt, fmt)
+
+          # =========================
+          # 主程式
+          # =========================
+          def main():
+              all_orgs = get_user_orgs()
+              print(f"[INFO] 找到 {len(all_orgs)} 個 org: {all_orgs}")
+
+              results = []
+              reports_root = os.path.join(os.getcwd(), "Reports")
+              os.makedirs(reports_root, exist_ok=True)
+
+              for org in all_orgs:
+                  repos = get_org_repos(org)
+                  print(f"[INFO] Org {org} 有 {len(repos)} 個 repo")
+
+                  for repo in repos:
+                      if CANCEL.is_set():
+                          print("[WARN] 已收到取消旗標，停止處理後續 repo。")
+                          break
+
+                      github_org = repo["org"]
+                      github_repo = repo["name"]
+
+                      print(f"\n[INFO] ========== 處理 Repository: {github_org}/{github_repo} ==========")
+
+                      props = get_repo_properties(github_org, github_repo)
+                      repo_project_type = props.get("category", "UNKNOWN")
+                      print(f"[INFO] category: {repo_project_type}")
+
+                      project_type_for_mend = detect_project_type(repo_project_type)
+                      if project_type_for_mend == "UNKNOWN":
+                          print(f"[WARN] {github_org}/{github_repo} 沒有設定 category 或不在對照表中，跳過")
+                          continue
+
+                      application_name = f"{DEPARTMENT}_{project_type_for_mend}"
+                      project_name = github_repo
+                      print(f"[INFO] Mend 對應 -> Application: {application_name} / Project: {project_name}")
+
+                      # 每個 project 一個資料夾: Reports/{project_name}/
+                      project_report_dir = os.path.join(reports_root, project_name)
+                      os.makedirs(project_report_dir, exist_ok=True)
+
+                      record = {
+                          "repo": f"{github_org}/{github_repo}",
+                          "application": application_name,
+                          "project": project_name,
+                          "sca_success": False,
+                          "sast_success": False,
+                          "reports": {}
+                      }
+
+                      try:
+                          project_path = checkout_repo(github_org, github_repo)
+
+                          sca_ok = run_mend_sca_scan(project_path, application_name, project_name)
+                          record["sca_success"] = sca_ok
+
+                          sast_ok = run_mend_sast_scan(project_path, application_name, project_name)
+                          record["sast_success"] = sast_ok
+
+                          if (sca_ok or sast_ok) and not CANCEL.is_set():
+                              project_uuid = wait_for_project_uuid(application_name, project_name)
+
+                              if project_uuid:
+                                  if sca_ok:
+                                      sbom_path = os.path.join(project_report_dir, f"SBOM.{_ext_for(SBOM_FORMAT)}")
+                                      if download_sbom_report(project_uuid, sbom_path):
+                                          record["reports"]["sbom"] = sbom_path
+
+                                      risk_path = os.path.join(project_report_dir, f"RISK_REPORT.{_ext_for(RISK_REPORT_FORMAT)}")
+                                      if download_risk_report(project_uuid, risk_path):
+                                          record["reports"]["risk_report"] = risk_path
+
+                                      inv_path = os.path.join(project_report_dir, f"INVENTORY_REPORT.{_ext_for(INVENTORY_REPORT_FORMAT)}")
+                                      if download_inventory_report(project_uuid, inv_path):
+                                          record["reports"]["inventory_report"] = inv_path
+
+                                      dd_path = os.path.join(project_report_dir, f"DUE_DILIGENCE_REPORT.{_ext_for(DUE_DILIGENCE_FORMAT)}")
+                                      if download_due_diligence_report(project_uuid, dd_path):
+                                          record["reports"]["due_diligence_report"] = dd_path
+
+                                  if sast_ok:
+                                      cc_path = os.path.join(project_report_dir, "CODE_COMPLIANCE_REPORT.pdf")
+                                      if download_code_compliance_report(project_uuid, cc_path):
+                                          record["reports"]["code_compliance_report"] = cc_path
+                              else:
+                                  print(f"[WARN] 找不到 {application_name}//{project_name} 的 projectUuid，略過報告下載")
+
+                      except Exception as e:
+                          print(f"[!] 處理 {github_org}/{github_repo} 時發生例外: {e}")
+
+                      results.append(record)
+
+              with open("mend_scan_results.json", "w", encoding="utf-8") as f:
+                  json.dump(results, f, indent=2, ensure_ascii=False)
+
+              print("[INFO] 所有結果已寫入 mend_scan_results.json")
+
+          if __name__ == "__main__":
+              main()
+
+      - name: Upload Reports to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GSS_Report
+          path: Reports/**
