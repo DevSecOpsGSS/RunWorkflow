@@ -9,7 +9,7 @@ env:
   MEND_EMAIL: ${{ secrets.MEND_EMAIL }}
   MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
   MEND_ORG_UUID: ${{ secrets.MEND_ORG_UUID }}   # Mend Platform -> Administration -> General Configuration -> Organization UUID
-  MEND_ORGANIZATION: ${{ secrets.MEND_ORGANIZATION }}  # Mend CLI 登入用，若 MEND_USER_KEY 帳號跨多個 org 必須設定，否則掃描結果會落在錯的 org
+  MEND_ORGANIZATION: ${{ secrets.MEND_ORG_UUID }}  # Mend CLI 登入用，跟 MEND_ORG_UUID 是同一組值，直接共用
 
   # 部門名稱 如 OLD_TS
   DEPARTMENT: 'OLD_TS'
@@ -29,8 +29,8 @@ env:
   # API 設定
   GITHUB_API: 'https://api.github.com'
 
-  # Clone 路徑
-  CLONE_BASE_DIR: '/tmp/MendRepos'
+  # Clone 路徑 (留空的話，程式會自動用 RUNNER_TEMP，跨 Windows/Linux 都適用)
+  CLONE_BASE_DIR: ''
 
 jobs:
   run-MendScanRepo:
@@ -44,16 +44,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Mend CLI
+        shell: cmd
         run: |
-          curl -LJO https://downloads.mend.io/cli/linux_amd64/mend
-          chmod +x mend
-          sudo mv mend /usr/local/bin/mend
-          mend version
+          mkdir "%RUNNER_TEMP%\mend-cli"
+          curl -L -o "%RUNNER_TEMP%\mend-cli\mend.exe" https://downloads.mend.io/cli/windows_amd64/mend.exe
+          echo %RUNNER_TEMP%\mend-cli>>%GITHUB_PATH%
+          "%RUNNER_TEMP%\mend-cli\mend.exe" version
 
       - name: Verify Python version
+        shell: cmd
         run: python --version
 
       - name: Install dependencies
+        shell: cmd
         run: |
           python -m pip install --upgrade pip
           pip install requests
@@ -119,7 +122,9 @@ jobs:
           signal.signal(signal.SIGINT, _soft_cancel)
 
           DEPARTMENT = os.getenv("DEPARTMENT", "OLD_TS")
-          CLONE_BASE_DIR = os.getenv("CLONE_BASE_DIR", "/tmp/MendRepos")
+          CLONE_BASE_DIR = os.getenv("CLONE_BASE_DIR") or os.path.join(
+              os.getenv("RUNNER_TEMP", os.getcwd()), "MendRepos"
+          )
           API = os.getenv("GITHUB_API", "https://api.github.com")
           MEND_URL = os.getenv("MEND_URL", "https://saas.mend.io")
           MEND_API_URL = os.getenv("MEND_API_URL", "https://api-saas.mend.io/api/v3.0")
