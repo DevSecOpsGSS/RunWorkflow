@@ -43,14 +43,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Mend CLI
-        shell: cmd
-        run: |
-          mkdir "%RUNNER_TEMP%\mend-cli"
-          curl -L -o "%RUNNER_TEMP%\mend-cli\mend.exe" https://downloads.mend.io/cli/windows_amd64/mend.exe
-          echo %RUNNER_TEMP%\mend-cli>>%GITHUB_PATH%
-          "%RUNNER_TEMP%\mend-cli\mend.exe" version
-
       - name: Verify Python version
         shell: cmd
         run: python --version
@@ -81,6 +73,11 @@ jobs:
           # ============================================================
           # 使用者可調整參數 (放在腳本最上方，方便自行修改)
           # ============================================================
+          # Mend CLI 執行檔的固定路徑 (self-hosted runner 上手動放置好的位置)
+          # 若這台 runner 上的路徑不同，改這裡就好，不用改下面呼叫的地方
+          MEND_CLI_PATH = "C:\mend\mend.exe"
+          MEND_UA_PATH = "C:\mend\wss-unified-agent.txt"
+
           # Code Compliance Report (SAST) 使用的合規標準
           # 可選值：Default, OWASP Top 10 2017, OWASP Top 10 2021, OWASP Top 10 2025,
           #         PCI DSS, PCI DSS 4.0, NIST, SANS/CWE Top 25, HIPAA, HITRUST, CAPEC, MISRA
@@ -156,6 +153,16 @@ jobs:
           print("[DEBUG] DEPARTMENT:", DEPARTMENT)
           print("[DEBUG] CATEGORY_GROUPS:", CATEGORY_GROUPS)
           print("[DEBUG] COMPLIANCE_STANDARD:", COMPLIANCE_STANDARD)
+          print("[DEBUG] MEND_CLI_PATH:", MEND_CLI_PATH)
+          print("[DEBUG] MEND_UA_PATH:", MEND_UA_PATH)
+
+          if not os.path.isfile(MEND_UA_PATH):
+              print(f"[ERROR] 找不到 Mend CLI，請確認這台 runner 上 {MEND_CLI_PATH} 這個檔案存在")
+              sys.exit(1)
+
+          if not os.path.isfile(MEND_UA_PATH):
+              print(f"[ERROR] 找不到 Mend CLI，請確認這台 runner 上 {MEND_UA_PATH} 這個檔案存在")
+              sys.exit(1)   
 
           HEADERS = {
               "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -316,13 +323,13 @@ jobs:
 
 
           def run_mend_sca_scan(project_path, application_name, project_name):
-              cmd = ["mend", "dep", "-d", project_path, "--update",
-                     "--scope", f"{application_name}//{project_name}", "--non-interactive"]
+              cmd = [MEND_CLI_PATH, "ua", "-c", MEND_UA_PATH, "-d", project_path, "-product", application_name,
+                      "-project", project_name, "--non-interactive"]
               return run_mend_command(cmd, "SCA")
 
 
           def run_mend_sast_scan(project_path, application_name, project_name):
-              cmd = ["mend", "code", "-d", project_path,
+              cmd = [MEND_CLI_PATH, "code", "-d", project_path,
                      "--scope", f"{application_name}//{project_name}", "--non-interactive"]
               return run_mend_command(cmd, "SAST")
 
