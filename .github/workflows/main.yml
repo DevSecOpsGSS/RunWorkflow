@@ -35,7 +35,7 @@ env:
 jobs:
   run-MendScanRepo:
     runs-on:
-      group: OLD_TS_WEB_RUNNER_GROUP
+      group: devsecops_group
     timeout-minutes: 1440
     env:
       PYTHONUNBUFFERED: 1
