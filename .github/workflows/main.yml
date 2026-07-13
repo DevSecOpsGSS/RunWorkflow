@@ -82,9 +82,13 @@ jobs:
           # 使用者可調整參數 (放在腳本最上方，方便自行修改)
           # ============================================================
           # Code Compliance Report (SAST) 使用的合規標準
-          # 可選值請以 Mend Platform 建立報告時的下拉選單為準，常見如：
-          # [Default,OWASP Top 10 2017,OWASP Top 10 2021,OWASP Top 10 2025,PCI DSS,PCI DSS 4.0,NIST,SANS/CWE Top 25,HIPAA,HITRUST,CAPEC,MISRA]
+          # 可選值：Default, OWASP Top 10 2017, OWASP Top 10 2021, OWASP Top 10 2025,
+          #         PCI DSS, PCI DSS 4.0, NIST, SANS/CWE Top 25, HIPAA, HITRUST, CAPEC, MISRA
           COMPLIANCE_STANDARD = "OWASP Top 10 2025"
+
+          # Code Compliance Report 的詳細程度 (必填欄位，之前漏掉導致 400 錯誤)
+          # 可選值：technical (完整技術細節) / short / summary (摘要)
+          COMPLIANCE_REPORT_LEVEL = "technical"
 
           # SBOM 報告：reportType 決定輸出的 SBOM 標準 (cycloneDX / spdx 等)，format 決定檔案格式
           SBOM_REPORT_TYPE = "cycloneDX"
@@ -478,7 +482,8 @@ jobs:
                   "name": "Code Compliance Report",
                   "format": "pdf",
                   "exportMode": "fullPdf",
-                  "complianceStandard": COMPLIANCE_STANDARD
+                  "complianceStandard": COMPLIANCE_STANDARD,
+                  "reportLevel": COMPLIANCE_REPORT_LEVEL
               }
               return generate_and_download_v3_report(
                   f"projects/{project_uuid}/code/reports/compliance", payload, output_path, "Code Compliance Report"
