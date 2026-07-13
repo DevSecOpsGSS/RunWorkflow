@@ -9,6 +9,7 @@ env:
   MEND_EMAIL: ${{ secrets.MEND_EMAIL }}
   MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
   MEND_ORG_UUID: ${{ secrets.MEND_ORG_UUID }}   # Mend Platform -> Administration -> General Configuration -> Organization UUID
+  MEND_ORGANIZATION: ${{ secrets.MEND_ORGANIZATION }}  # Mend CLI 登入用，若 MEND_USER_KEY 帳號跨多個 org 必須設定，否則掃描結果會落在錯的 org
 
   # 部門名稱 如 OLD_TS
   DEPARTMENT: 'OLD_TS'
@@ -34,7 +35,7 @@ env:
 jobs:
   run-MendScanRepo:
     runs-on:
-      group: devsecops_group
+      group: OLD_TS_WEB_RUNNER_GROUP
     timeout-minutes: 1440
     env:
       PYTHONUNBUFFERED: 1
@@ -64,6 +65,7 @@ jobs:
           MEND_EMAIL: ${{ env.MEND_EMAIL }}
           MEND_USER_KEY: ${{ env.MEND_USER_KEY }}
           MEND_ORG_UUID: ${{ env.MEND_ORG_UUID }}
+          MEND_ORGANIZATION: ${{ env.MEND_ORGANIZATION }}
           MEND_URL: ${{ env.MEND_URL }}
           MEND_API_URL: ${{ env.MEND_API_URL }}
           GITHUB_API: ${{ env.GITHUB_API }}
@@ -126,6 +128,9 @@ jobs:
           MEND_EMAIL = os.getenv("MEND_EMAIL")
           MEND_USER_KEY = os.getenv("MEND_USER_KEY")
           MEND_ORG_UUID = os.getenv("MEND_ORG_UUID")
+          # Mend CLI (mend dep / mend code) 登入用：若 MEND_USER_KEY 帳號屬於多個 org 必須設定，
+          # 否則掃描結果會落在該帳號「上次存取」的 org，在共用 runner 上不可預期
+          MEND_ORGANIZATION = os.getenv("MEND_ORGANIZATION")
 
           CATEGORY_GROUPS_JSON_STR = os.getenv("CATEGORY_GROUPS_JSON", '{}')
           CATEGORY_GROUPS = json.loads(CATEGORY_GROUPS_JSON_STR)
@@ -228,6 +233,10 @@ jobs:
               env["MEND_URL"] = MEND_URL
               env["MEND_EMAIL"] = MEND_EMAIL
               env["MEND_USER_KEY"] = MEND_USER_KEY
+              # 如果 MEND_USER_KEY 對應的帳號屬於多個 org，一定要設這個，
+              # 否則掃描結果會跑到「這個帳號上次存取的 org」，在 CI/CD 共用 runner 上不可預期
+              if MEND_ORGANIZATION:
+                  env["MEND_ORGANIZATION"] = MEND_ORGANIZATION
 
               p = subprocess.Popen(
                   cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
