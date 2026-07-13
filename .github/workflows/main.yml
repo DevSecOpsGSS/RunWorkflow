@@ -10,7 +10,36 @@ env:
   MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
   MEND_ORG_UUID: ${{ secrets.MEND_ORG_UUID }}   # Mend Platform -> Administration -> General Configuration -> Organization UUID
   MEND_ORGANIZATION: ${{ secrets.MEND_ORG_UUID }}  # Mend CLI 登入用，跟 MEND_ORG_UUID 是同一組值，直接共用
+  # ============================================================
+  # 使用者可調整參數 (放在腳本最上方，方便自行修改)
+  # ============================================================
+  # Mend CLI 執行檔的固定路徑 (self-hosted runner 上手動放置好的位置)
+  # 若這台 runner 上的路徑不同，改這裡就好，不用改下面呼叫的地方
+  MEND_CLI_PATH : 'C:\mend\mend.exe'
+  MEND_UA_PATH : 'C:\mend\wss-unified-agent.txt'
+  
+  # Code Compliance Report (SAST) 使用的合規標準
+  # 可選值：Default, OWASP Top 10 2017, OWASP Top 10 2021, OWASP Top 10 2025,
+  # PCI DSS, PCI DSS 4.0, NIST, SANS/CWE Top 25, HIPAA, HITRUST, CAPEC, MISRA
+  COMPLIANCE_STANDARD : 'OWASP Top 10 2025'
 
+  # Code Compliance Report 的詳細程度 (必填欄位，之前漏掉導致 400 錯誤)
+  # 可選值：technical (完整技術細節) / short / summary (摘要)
+  COMPLIANCE_REPORT_LEVEL : 'technical'
+
+  # SBOM 報告：reportType 決定輸出的 SBOM 標準 (cycloneDX / spdx 等)，format 決定檔案格式
+  SBOM_REPORT_TYPE : 'cycloneDX'
+  SBOM_FORMAT : 'json'
+
+  # Risk Report 格式 (依 Mend Platform UI 固定為 PDF)
+  RISK_REPORT_FORMAT : 'pdf'
+
+  # Inventory Report 格式：excel / json / xml
+  INVENTORY_REPORT_FORMAT: 'excel'
+
+  # Due Diligence Report 格式：excel / json / xml (不支援 pdf)
+  DUE_DILIGENCE_FORMAT : 'json'
+  
   # 部門名稱 如 OLD_TS
   DEPARTMENT: 'OLD_TS'
 
@@ -29,7 +58,7 @@ env:
   # API 設定
   GITHUB_API: 'https://api.github.com'
 
-  # Clone 路徑 (留空的話，程式會自動用 RUNNER_TEMP，跨 Windows/Linux 都適用)
+  # Clone 路徑 (留空的話，程式會自動用 RUNNER_TEMP)
   CLONE_BASE_DIR: ''
 
 jobs:
@@ -67,38 +96,31 @@ jobs:
           DEPARTMENT: ${{ env.DEPARTMENT }}
           CLONE_BASE_DIR: ${{ env.CLONE_BASE_DIR }}
           CATEGORY_GROUPS_JSON: ${{ env.CATEGORY_GROUPS_JSON }}
+          COMPLIANCE_STANDARD: ${{ env.COMPLIANCE_STANDARD }}
+          COMPLIANCE_REPORT_LEVEL: ${{ env.COMPLIANCE_REPORT_LEVEL }}
+          SBOM_REPORT_TYPE: ${{ env.SBOM_REPORT_TYPE }}
+          SBOM_FORMAT: ${{ env.SBOM_FORMAT }}
+          RISK_REPORT_FORMAT: ${{ env.RISK_REPORT_FORMAT }}
+          INVENTORY_REPORT_FORMAT: ${{ env.INVENTORY_REPORT_FORMAT }}
+          DUE_DILIGENCE_FORMAT: ${{ env.DUE_DILIGENCE_FORMAT }}
+          MEND_CLI_PATH: ${{ env.MEND_CLI_PATH }}
+          MEND_UA_PATH: ${{ env.MEND_UA_PATH }}
+          
         run: |
           import os, json, requests, subprocess, shutil, stat, time, sys, signal, threading, re
 
           # ============================================================
           # 使用者可調整參數 (放在腳本最上方，方便自行修改)
           # ============================================================
-          # Mend CLI 執行檔的固定路徑 (self-hosted runner 上手動放置好的位置)
-          # 若這台 runner 上的路徑不同，改這裡就好，不用改下面呼叫的地方
-          MEND_CLI_PATH = "C:\mend\mend.exe"
-          MEND_UA_PATH = "C:\mend\wss-unified-agent.txt"
-
-          # Code Compliance Report (SAST) 使用的合規標準
-          # 可選值：Default, OWASP Top 10 2017, OWASP Top 10 2021, OWASP Top 10 2025,
-          #         PCI DSS, PCI DSS 4.0, NIST, SANS/CWE Top 25, HIPAA, HITRUST, CAPEC, MISRA
-          COMPLIANCE_STANDARD = "OWASP Top 10 2025"
-
-          # Code Compliance Report 的詳細程度 (必填欄位，之前漏掉導致 400 錯誤)
-          # 可選值：technical (完整技術細節) / short / summary (摘要)
-          COMPLIANCE_REPORT_LEVEL = "technical"
-
-          # SBOM 報告：reportType 決定輸出的 SBOM 標準 (cycloneDX / spdx 等)，format 決定檔案格式
-          SBOM_REPORT_TYPE = "cycloneDX"
-          SBOM_FORMAT = "json"
-
-          # Risk Report 格式 (依 Mend Platform UI 固定為 PDF)
-          RISK_REPORT_FORMAT = "pdf"
-
-          # Inventory Report 格式：excel / json / xml
-          INVENTORY_REPORT_FORMAT = "excel"
-
-          # Due Diligence Report 格式：excel / json / xml (不支援 pdf)
-          DUE_DILIGENCE_FORMAT = "json"
+          COMPLIANCE_STANDARD = os.getenv("COMPLIANCE_STANDARD")
+          COMPLIANCE_REPORT_LEVEL = os.getenv("COMPLIANCE_REPORT_LEVEL")
+          SBOM_REPORT_TYPE = os.getenv("SBOM_REPORT_TYPE")
+          SBOM_FORMAT = os.getenv("SBOM_FORMAT")
+          RISK_REPORT_FORMAT = os.getenv("RISK_REPORT_FORMAT")
+          INVENTORY_REPORT_FORMAT = os.getenv("INVENTORY_REPORT_FORMAT")
+          DUE_DILIGENCE_FORMAT = os.getenv("DUE_DILIGENCE_FORMAT")
+          MEND_CLI_PATH = os.getenv("MEND_CLI_PATH")
+          MEND_UA_PATH = os.getenv("MEND_UA_PATH")
 
           # Mend 後台處理掃描結果的輪詢設定（掃描完到 project 出現在 API 之間的等待）
           PROJECT_WAIT_MAX_RETRIES = 10
@@ -156,12 +178,12 @@ jobs:
           print("[DEBUG] MEND_CLI_PATH:", MEND_CLI_PATH)
           print("[DEBUG] MEND_UA_PATH:", MEND_UA_PATH)
 
-          if not os.path.isfile(MEND_UA_PATH):
+          if not os.path.isfile(MEND_CLI_PATH):
               print(f"[ERROR] 找不到 Mend CLI，請確認這台 runner 上 {MEND_CLI_PATH} 這個檔案存在")
               sys.exit(1)
 
           if not os.path.isfile(MEND_UA_PATH):
-              print(f"[ERROR] 找不到 Mend CLI，請確認這台 runner 上 {MEND_UA_PATH} 這個檔案存在")
+              print(f"[ERROR] 找不到 Mend UA Config，請確認這台 runner 上 {MEND_UA_PATH} 這個檔案存在")
               sys.exit(1)   
 
           HEADERS = {
@@ -324,7 +346,7 @@ jobs:
 
           def run_mend_sca_scan(project_path, application_name, project_name):
               cmd = [MEND_CLI_PATH, "ua", "-c", MEND_UA_PATH, "-d", project_path, "-product", application_name,
-                      "-project", project_name, "--non-interactive"]
+                      "-project", project_name]
               return run_mend_command(cmd, "SCA")
 
 
