@@ -76,7 +76,7 @@ jobs:
           CLONE_BASE_DIR: ${{ env.CLONE_BASE_DIR }}
           CATEGORY_GROUPS_JSON: ${{ env.CATEGORY_GROUPS_JSON }}
         run: |
-          import os, json, requests, subprocess, shutil, stat, time, sys, signal, threading
+          import os, json, requests, subprocess, shutil, stat, time, sys, signal, threading, re
 
           # ============================================================
           # 使用者可調整參數 (放在腳本最上方，方便自行修改)
@@ -109,6 +109,13 @@ jobs:
           # ============================================================
 
           CANCEL = threading.Event()
+
+          # 強制 stdout/stderr 用 UTF-8，避免 Windows 主機預設編碼 (如 cp950) 造成中文亂碼或解碼錯誤
+          try:
+              sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+              sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+          except Exception:
+              pass
 
           def _soft_cancel(signum, frame):
               CANCEL.set()
@@ -231,7 +238,13 @@ jobs:
           # =========================
           # 通用：執行 Mend CLI 指令（mend dep / mend code 共用）
           # =========================
-          def run_mend_command(cmd: list, label: str) -> bool:
+          # 從 Mend CLI 輸出的網址裡擷取 projectUuid，例如:
+          # https://saas.mend.io/app/orgs/GSS/applications/summary?project=27677c04-59fb-4efa-8ff3-fc5cfd65e07a
+          _PROJECT_UUID_RE = re.compile(r"[?&]project=([0-9a-fA-F-]{36})")
+
+          def run_mend_command(cmd: list, label: str):
+              """回傳 (success: bool, project_uuid: str|None)。
+              project_uuid 是從 CLI 印出的網址直接擷取，比事後呼叫 API 查詢更可靠。"""
               print(f"[INFO] 執行命令 ({label}): {' '.join(cmd)}")
 
               env = os.environ.copy()
@@ -245,16 +258,20 @@ jobs:
 
               p = subprocess.Popen(
                   cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                  text=True, bufsize=1, env=env
+                  text=True, encoding="utf-8", errors="replace", bufsize=1, env=env
               )
 
               rc = None
+              found_uuid = None
               try:
                   for line in iter(p.stdout.readline, ''):
                       if CANCEL.is_set():
                           print(f"\n[WARN] 已收到取消旗標，停止 {label} 掃描…", flush=True)
                           break
                       sys.stdout.write(line); sys.stdout.flush()
+                      m = _PROJECT_UUID_RE.search(line)
+                      if m:
+                          found_uuid = m.group(1)
 
                   if CANCEL.is_set() and p.poll() is None:
                       try: p.terminate()
@@ -289,18 +306,18 @@ jobs:
 
               if CANCEL.is_set():
                   print(f"[SKIP] {label} 已被取消。", flush=True)
-                  return False
+                  return False, found_uuid
 
-              return rc == 0
+              return (rc == 0), found_uuid
 
 
-          def run_mend_sca_scan(project_path, application_name, project_name) -> bool:
+          def run_mend_sca_scan(project_path, application_name, project_name):
               cmd = ["mend", "dep", "-d", project_path, "--update",
                      "--scope", f"{application_name}//{project_name}", "--non-interactive"]
               return run_mend_command(cmd, "SCA")
 
 
-          def run_mend_sast_scan(project_path, application_name, project_name) -> bool:
+          def run_mend_sast_scan(project_path, application_name, project_name):
               cmd = ["mend", "code", "-d", project_path,
                      "--scope", f"{application_name}//{project_name}", "--non-interactive"]
               return run_mend_command(cmd, "SAST")
@@ -529,14 +546,18 @@ jobs:
                       try:
                           project_path = checkout_repo(github_org, github_repo)
 
-                          sca_ok = run_mend_sca_scan(project_path, application_name, project_name)
+                          sca_ok, sca_uuid = run_mend_sca_scan(project_path, application_name, project_name)
                           record["sca_success"] = sca_ok
 
-                          sast_ok = run_mend_sast_scan(project_path, application_name, project_name)
+                          sast_ok, sast_uuid = run_mend_sast_scan(project_path, application_name, project_name)
                           record["sast_success"] = sast_ok
 
                           if (sca_ok or sast_ok) and not CANCEL.is_set():
-                              project_uuid = wait_for_project_uuid(application_name, project_name)
+                              # 優先用掃描時直接從 CLI 輸出擷取到的 projectUuid（比事後查 API 更可靠）
+                              project_uuid = sca_uuid or sast_uuid
+                              if not project_uuid:
+                                  print("[INFO] 掃描輸出裡沒擷取到 projectUuid，改用 API 查詢 fallback")
+                                  project_uuid = wait_for_project_uuid(application_name, project_name)
 
                               if project_uuid:
                                   if sca_ok:
