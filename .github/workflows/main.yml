@@ -83,8 +83,8 @@ jobs:
           # ============================================================
           # Code Compliance Report (SAST) 使用的合規標準
           # 可選值請以 Mend Platform 建立報告時的下拉選單為準，常見如：
-          # "OWASP Top 10", "OWASP API Security Top 10", "PCI DSS", "CWE Top 25" 等
-          COMPLIANCE_STANDARD = "OWASP Top 10"
+          # [Default,OWASP Top 10 2017,OWASP Top 10 2021,OWASP Top 10 2025,PCI DSS,PCI DSS 4.0,NIST,SANS/CWE Top 25,HIPAA,HITRUST,CAPEC,MISRA]
+          COMPLIANCE_STANDARD = "OWASP Top 10 2025"
 
           # SBOM 報告：reportType 決定輸出的 SBOM 標準 (cycloneDX / spdx 等)，format 決定檔案格式
           SBOM_REPORT_TYPE = "cycloneDX"
