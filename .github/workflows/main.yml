@@ -17,13 +17,13 @@ env:
   # 若這台 runner 上的路徑不同，改這裡就好，不用改下面呼叫的地方
   MEND_CLI_PATH : 'C:\mend\mend.exe'
   MEND_UA_PATH : 'C:\mend\wss-unified-agent.txt'
-  
+
   # Code Compliance Report (SAST) 使用的合規標準
   # 可選值：Default, OWASP Top 10 2017, OWASP Top 10 2021, OWASP Top 10 2025,
   # PCI DSS, PCI DSS 4.0, NIST, SANS/CWE Top 25, HIPAA, HITRUST, CAPEC, MISRA
   COMPLIANCE_STANDARD : 'OWASP Top 10 2025'
 
-  # Code Compliance Report 的詳細程度 (必填欄位，之前漏掉導致 400 錯誤)
+  # Code Compliance Report 的詳細程度 (必填欄位)
   # 可選值：technical (完整技術細節) / short / summary (摘要)
   COMPLIANCE_REPORT_LEVEL : 'technical'
 
@@ -39,7 +39,7 @@ env:
 
   # Due Diligence Report 格式：excel / json / xml (不支援 pdf)
   DUE_DILIGENCE_FORMAT : 'json'
-  
+
   # 部門名稱 如 OLD_TS
   DEPARTMENT: 'OLD_TS'
 
@@ -105,13 +105,10 @@ jobs:
           DUE_DILIGENCE_FORMAT: ${{ env.DUE_DILIGENCE_FORMAT }}
           MEND_CLI_PATH: ${{ env.MEND_CLI_PATH }}
           MEND_UA_PATH: ${{ env.MEND_UA_PATH }}
-          
-        run: |
-          import os, json, requests, subprocess, shutil, stat, time, sys, signal, threading, re
 
-          # ============================================================
-          # 使用者可調整參數 (放在腳本最上方，方便自行修改)
-          # ============================================================
+        run: |
+          import os, json, requests, subprocess, shutil, stat, time, sys, signal, threading, re, zipfile, io
+
           COMPLIANCE_STANDARD = os.getenv("COMPLIANCE_STANDARD")
           COMPLIANCE_REPORT_LEVEL = os.getenv("COMPLIANCE_REPORT_LEVEL")
           SBOM_REPORT_TYPE = os.getenv("SBOM_REPORT_TYPE")
@@ -127,7 +124,8 @@ jobs:
           PROJECT_WAIT_INTERVAL_SECONDS = 15
 
           # 非同步報告的輪詢設定
-          REPORT_POLL_MAX_RETRIES = 20
+          # 20 次 x 15 秒 = 5 分鐘太短，實測 SBOM 有時會需要更久才處理完，拉長到 10 分鐘
+          REPORT_POLL_MAX_RETRIES = 40
           REPORT_POLL_INTERVAL_SECONDS = 15
           # ============================================================
 
@@ -163,8 +161,6 @@ jobs:
           MEND_EMAIL = os.getenv("MEND_EMAIL")
           MEND_USER_KEY = os.getenv("MEND_USER_KEY")
           MEND_ORG_UUID = os.getenv("MEND_ORG_UUID")
-          # Mend CLI (mend dep / mend code) 登入用：若 MEND_USER_KEY 帳號屬於多個 org 必須設定，
-          # 否則掃描結果會落在該帳號「上次存取」的 org，在共用 runner 上不可預期
           MEND_ORGANIZATION = os.getenv("MEND_ORGANIZATION")
 
           CATEGORY_GROUPS_JSON_STR = os.getenv("CATEGORY_GROUPS_JSON", '{}')
@@ -184,7 +180,7 @@ jobs:
 
           if not os.path.isfile(MEND_UA_PATH):
               print(f"[ERROR] 找不到 Mend UA Config，請確認這台 runner 上 {MEND_UA_PATH} 這個檔案存在")
-              sys.exit(1)   
+              sys.exit(1)
 
           HEADERS = {
               "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -365,13 +361,6 @@ jobs:
           #   Code Compliance Report (SAST): https://api-docs.mend.io/platform/3.0/reports/exportcodecompliancereport
           #   Download Report: https://api-docs.mend.io/platform/3.0/reports/downloadreport
           # 認證流程: login (email+userKey+orgUuid) -> refreshToken -> login/accessToken -> jwtToken (30分鐘效期)
-          #
-          # !!! 注意 !!!
-          # dependencies/reports/risk 與 dependencies/reports/inventory 這兩個路徑的文件頁面
-          # 抓取時只回傳到標題 (確認是 "Dependencies - SCA" 底下的端點)，沒有拿到逐欄位內容，
-          # 是依 SBOM ("dependencies/reports/SBOM") 與 Due Diligence ("dependencies/reports/dueDiligence")
-          # 已驗證路徑的命名規律，以及 reportType enum 中本來就有的 "risk"、"inventory" 值推斷出來的。
-          # 正式使用前請先用 Postman 或測試環境實際打一次確認路徑與必要欄位。
           # =========================
           _jwt_state = {"token": None, "expires_at": 0}
 
@@ -429,11 +418,22 @@ jobs:
                   time.sleep(wait_seconds)
               return None
 
+          # =========================
+          # 檔案名稱依副檔名決定（依格式）
+          # =========================
+          _EXT_MAP = {"json": "json", "xml": "xml", "excel": "xlsx", "pdf": "pdf"}
 
-          def generate_and_download_v3_report(create_path: str, payload: dict, output_path: str, label: str) -> bool:
+          def _ext_for(fmt: str) -> str:
+              return _EXT_MAP.get(fmt, fmt)
+
+
+          def generate_and_download_v3_report(create_path: str, payload: dict, output_path: str, label: str,
+                                               expected_format: str = None) -> bool:
               """
               共用流程: 建立報告 -> 輪詢狀態 -> 下載
               create_path 例如 f"projects/{project_uuid}/dependencies/reports/risk"
+              expected_format 用來驗證下載回來的內容是不是真的長那個樣子 (例如 pdf 應該要有 %PDF 開頭簽章)，
+              避免 API 其實回了 JSON 錯誤訊息，卻被我們原封不動存成 .pdf/.xlsx，導致檔案打不開。
               """
               headers = mend_platform_headers()
               resp = requests.post(f"{MEND_API_URL}/{create_path}", json=payload, headers=headers, timeout=60)
@@ -472,8 +472,55 @@ jobs:
                   print(f"[ERROR] {label} 下載失敗，status={dresp.status_code}")
                   return False
 
+              content_type = dresp.headers.get("Content-Type", "")
+              content = dresp.content
+              print(f"[INFO] {label} 下載回應 Content-Type: {content_type}, 大小: {len(content)} bytes")
+
+              # Mend 的下載 API 有些報告類型回傳的其實是「外層包裝 zip」，裡面才裝著真正的報告檔案。
+              # 用「zip 裡有沒有副檔名符合預期格式的檔案」來判斷要不要解包，
+              # 找不到符合的但整包只有 1 個檔案，也當作外層包裝解開；
+              # 都不符合才視為「內容本身就是多檔案格式 (例如真正的 xlsx)」，不解包直接使用原始內容。
+              if content[:2] == b"PK":
+                  try:
+                      with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                          file_names = [n for n in zf.namelist() if not n.endswith("/")]
+                          expected_ext = "." + _ext_for(expected_format) if expected_format else None
+                          matches = [n for n in file_names if expected_ext and n.lower().endswith(expected_ext)]
+
+                          if len(matches) == 1:
+                              inner_name = matches[0]
+                          elif len(file_names) == 1:
+                              inner_name = file_names[0]
+                          else:
+                              inner_name = None
+
+                          if inner_name:
+                              print(f"[INFO] {label} 下載回來的是外層包裝 zip，正在解壓縮...")
+                              content = zf.read(inner_name)
+                              print(f"[INFO] {label} 從 zip 解出: {inner_name} ({len(content)} bytes)")
+                          else:
+                              print(f"[INFO] {label} 內容本身就是多檔案的 zip 格式 (例如 xlsx)，不需要解包，共 {len(file_names)} 個項目")
+                  except zipfile.BadZipFile:
+                      print(f"[ERROR] {label} 開頭是 PK 但不是合法的 zip 檔案")
+                      return False
+
+              # 針對 pdf 格式做內容驗證：真正的 PDF 檔案一定是 %PDF 開頭
+              if expected_format == "pdf" and not content.startswith(b"%PDF"):
+                  preview = content[:500].decode("utf-8", errors="replace")
+                  print(f"[ERROR] {label} 下載回來的內容不是有效的 PDF，可能是 API 回傳了錯誤訊息:")
+                  print(f"[ERROR] 內容前 500 字元: {preview}")
+                  return False
+
+              # 針對非 pdf 格式：如果內容看起來像 JSON 錯誤物件 (帶 errorMessage 等欄位) 就攔下來
+              if expected_format and expected_format != "pdf" and expected_format != "json":
+                  stripped = content[:1].decode("utf-8", errors="ignore")
+                  if stripped == "{":
+                      preview = content[:500].decode("utf-8", errors="replace")
+                      print(f"[WARN] {label} 預期是 {expected_format} 格式，但下載內容看起來像 JSON，請人工確認:")
+                      print(f"[WARN] 內容前 500 字元: {preview}")
+
               with open(output_path, "wb") as f:
-                  f.write(dresp.content)
+                  f.write(content)
               print(f"[SUCCESS] {label} 已下載: {output_path}")
               return True
 
@@ -481,28 +528,32 @@ jobs:
           def download_sbom_report(project_uuid: str, output_path: str) -> bool:
               payload = {"name": "SBOM Report", "format": SBOM_FORMAT, "reportType": SBOM_REPORT_TYPE}
               return generate_and_download_v3_report(
-                  f"projects/{project_uuid}/dependencies/reports/SBOM", payload, output_path, "SBOM"
+                  f"projects/{project_uuid}/dependencies/reports/SBOM", payload, output_path, "SBOM",
+                  expected_format=SBOM_FORMAT
               )
 
 
           def download_risk_report(project_uuid: str, output_path: str) -> bool:
-              payload = {"name": "Risk Report", "format": RISK_REPORT_FORMAT}
+              payload = {"name": "Risk Report", "format": RISK_REPORT_FORMAT, "exportMode": "fullPdf"}
               return generate_and_download_v3_report(
-                  f"projects/{project_uuid}/dependencies/reports/risk", payload, output_path, "Risk Report"
+                  f"projects/{project_uuid}/dependencies/reports/risk", payload, output_path, "Risk Report",
+                  expected_format=RISK_REPORT_FORMAT
               )
 
 
           def download_inventory_report(project_uuid: str, output_path: str) -> bool:
               payload = {"name": "Inventory Report", "format": INVENTORY_REPORT_FORMAT}
               return generate_and_download_v3_report(
-                  f"projects/{project_uuid}/dependencies/reports/inventory", payload, output_path, "Inventory Report"
+                  f"projects/{project_uuid}/dependencies/reports/inventory", payload, output_path, "Inventory Report",
+                  expected_format=INVENTORY_REPORT_FORMAT
               )
 
 
           def download_due_diligence_report(project_uuid: str, output_path: str) -> bool:
               payload = {"name": "Due Diligence Report", "format": DUE_DILIGENCE_FORMAT}
               return generate_and_download_v3_report(
-                  f"projects/{project_uuid}/dependencies/reports/dueDiligence", payload, output_path, "Due Diligence Report"
+                  f"projects/{project_uuid}/dependencies/reports/dueDiligence", payload, output_path, "Due Diligence Report",
+                  expected_format=DUE_DILIGENCE_FORMAT
               )
 
 
@@ -515,16 +566,9 @@ jobs:
                   "reportLevel": COMPLIANCE_REPORT_LEVEL
               }
               return generate_and_download_v3_report(
-                  f"projects/{project_uuid}/code/reports/compliance", payload, output_path, "Code Compliance Report"
+                  f"projects/{project_uuid}/code/reports/compliance", payload, output_path, "Code Compliance Report",
+                  expected_format="pdf"
               )
-
-          # =========================
-          # 檔案名稱依副檔名決定（依格式）
-          # =========================
-          _EXT_MAP = {"json": "json", "xml": "xml", "excel": "xlsx", "pdf": "pdf"}
-
-          def _ext_for(fmt: str) -> str:
-              return _EXT_MAP.get(fmt, fmt)
 
           # =========================
           # 主程式
