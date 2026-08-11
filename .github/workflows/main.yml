@@ -367,28 +367,22 @@ jobs:
           _jwt_state = {"token": None, "expires_at": 0}
 
           def get_mend_platform_token() -> str:
-              if _jwt_state["token"] and time.time() < _jwt_state["expires_at"]:
-                  return _jwt_state["token"]
-
-              login_payload = {"email": MEND_EMAIL, "userKey": MEND_USER_KEY, "orgUuid": MEND_ORG_UUID}
-              login_resp = requests.post(f"{MEND_API_URL}/login", json=login_payload, timeout=30)
-              login_resp.raise_for_status()
-              refresh_token = login_resp.json()["response"]["refreshToken"]
-
-              token_resp = requests.post(
-                  f"{MEND_API_URL}/login/accessToken",
-                  headers={"wss-refresh-token": refresh_token},
-                  params={"orgUuid": MEND_ORG_UUID},
-                  json={},
-                  timeout=30
-              )
-              token_resp.raise_for_status()
-              jwt_token = token_resp.json()["response"]["jwtToken"]
-
-              _jwt_state["token"] = jwt_token
-              _jwt_state["expires_at"] = time.time() + 25 * 60  # 提前於 30 分鐘效期到期前換新
-              return jwt_token
-
+          # 每次呼叫都直接重新登入，不快取
+          login_payload = {"email": MEND_EMAIL, "userKey": MEND_USER_KEY, "orgUuid": MEND_ORG_UUID}
+          login_resp = requests.post(f"{MEND_API_URL}/login", json=login_payload, timeout=30)
+          login_resp.raise_for_status()
+          refresh_token = login_resp.json()["response"]["refreshToken"]
+      
+          token_resp = requests.post(
+              f"{MEND_API_URL}/login/accessToken",
+              headers={"wss-refresh-token": refresh_token},
+              params={"orgUuid": MEND_ORG_UUID},
+              json={},
+              timeout=30
+          )
+          token_resp.raise_for_status()
+          jwt_token = token_resp.json()["response"]["jwtToken"]
+          return jwt_token
 
           def mend_platform_headers() -> dict:
               return {"Authorization": f"Bearer {get_mend_platform_token()}", "Content-Type": "application/json"}
