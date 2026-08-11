@@ -9,7 +9,7 @@ env:
   MEND_EMAIL: ${{ secrets.MEND_EMAIL }}
   MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
   MEND_ORG_UUID: ${{ secrets.MEND_ORG_UUID }}   # Mend Platform -> Administration -> General Configuration -> Organization UUID
-  : ${{ secrets.MEND_ORG_UUID }}  # Mend CLI 登入用，跟 MEND_ORG_UUID 是同一組值，直接共用
+  MEND_ORGANIZATION: ${{ secrets.MEND_ORG_UUID }}  # Mend CLI 登入用，跟 MEND_ORG_UUID 是同一組值，直接共用
   # ============================================================
   # 使用者可調整參數 (放在腳本最上方，方便自行修改)
   # ============================================================
