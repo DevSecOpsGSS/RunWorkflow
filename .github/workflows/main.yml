@@ -9,7 +9,7 @@ env:
   MEND_EMAIL: ${{ secrets.MEND_EMAIL }}
   MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
   MEND_ORG_UUID: ${{ secrets.MEND_ORG_UUID }}   # Mend Platform -> Administration -> General Configuration -> Organization UUID
-  MEND_ORGANIZATION: ${{ secrets.MEND_ORG_UUID }}  # Mend CLI 登入用，跟 MEND_ORG_UUID 是同一組值，直接共用
+  : ${{ secrets.MEND_ORG_UUID }}  # Mend CLI 登入用，跟 MEND_ORG_UUID 是同一組值，直接共用
   # ============================================================
   # 使用者可調整參數 (放在腳本最上方，方便自行修改)
   # ============================================================
@@ -168,6 +168,8 @@ jobs:
 
           print("[DEBUG] MEND_USER_KEY present?", "YES" if MEND_USER_KEY else "NO")
           print("[DEBUG] MEND_ORG_UUID present?", "YES" if MEND_ORG_UUID else "NO")
+          print("[DEBUG] MEND_EMAIL:", MEND_EMAIL or "(未設定)")
+          print("[DEBUG] MEND_ORGANIZATION:", MEND_ORGANIZATION or "(未設定)")
           print("[DEBUG] DEPARTMENT:", DEPARTMENT)
           print("[DEBUG] CATEGORY_GROUPS:", CATEGORY_GROUPS)
           print("[DEBUG] COMPLIANCE_STANDARD:", COMPLIANCE_STANDARD)
