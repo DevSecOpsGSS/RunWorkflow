@@ -41,7 +41,7 @@ env:
   DUE_DILIGENCE_FORMAT : 'json'
 
   # 部門名稱 如 OLD_TS
-  DEPARTMENT: 'OLD_TS'
+  DEPARTMENT: 'OLD_TS_GSS'
 
   # Category 前綴對照表 (JSON 格式)
   CATEGORY_GROUPS_JSON: |
